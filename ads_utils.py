@@ -1,12 +1,37 @@
 import os
 import hashlib
 import mimetypes
+import subprocess
 import requests
 
 
 def _get_mime_type(file_path: str, fallback: str) -> str:
     mime, _ = mimetypes.guess_type(file_path)
     return mime if mime else fallback
+
+
+def _convert_to_h264(input_path: str) -> str:
+    """Convert any video to H.264 MP4 — the only format Meta accepts.
+    Returns path to the converted file (caller must delete it).
+    """
+    output_path = os.path.splitext(input_path)[0] + "_h264.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=600)
+    if result.returncode != 0:
+        raise Exception(
+            f"ffmpeg conversion failed: {result.stderr.decode(errors='replace')}"
+        )
+    return output_path
 
 
 def _get_snapchat_access_token() -> str:
@@ -26,22 +51,27 @@ def _get_snapchat_access_token() -> str:
 def upload_to_meta(file_path: str, file_type: str) -> dict:
     access_token = os.getenv("META_ADS_ACCESS_TOKEN")
     ad_account_id = os.getenv("META_ADS_ACCOUNT_ID")
-    file_name = os.path.basename(file_path)
 
     if file_type == "video":
-        mime = _get_mime_type(file_path, "video/mp4")
-        url = f"https://graph-video.facebook.com/v18.0/{ad_account_id}/advideos"
-        with open(file_path, "rb") as f:
-            response = requests.post(
-                url,
-                data={"access_token": access_token, "name": file_name},
-                files={"source": (file_name, f, mime)},
-            )
+        # Always convert to H.264 MP4 — Meta only accepts this codec
+        converted_path = _convert_to_h264(file_path)
+        try:
+            url = f"https://graph-video.facebook.com/v18.0/{ad_account_id}/advideos"
+            file_name = os.path.basename(converted_path)
+            with open(converted_path, "rb") as f:
+                response = requests.post(
+                    url,
+                    data={"access_token": access_token, "name": os.path.splitext(os.path.basename(file_path))[0]},
+                    files={"source": (file_name, f, "video/mp4")},
+                )
+        finally:
+            if os.path.exists(converted_path):
+                os.remove(converted_path)
     else:
         mime = _get_mime_type(file_path, "image/jpeg")
         url = f"https://graph.facebook.com/v18.0/{ad_account_id}/adimages"
+        file_name = os.path.basename(file_path)
         with open(file_path, "rb") as f:
-            # Meta requires: files field name = actual filename, with correct MIME type
             response = requests.post(
                 url,
                 data={"access_token": access_token},
@@ -50,7 +80,6 @@ def upload_to_meta(file_path: str, file_type: str) -> dict:
 
     if not response.ok:
         raise Exception(f"Meta API error {response.status_code}: {response.text}")
-
     return response.json()
 
 
@@ -83,7 +112,6 @@ def upload_to_snapchat(file_path: str, file_type: str) -> dict:
         )
     if not upload_res.ok:
         raise Exception(f"Snapchat upload error {upload_res.status_code}: {upload_res.text}")
-
     return upload_res.json()
 
 
@@ -109,8 +137,6 @@ def upload_to_tiktok(file_path: str) -> dict:
             data=data,
             files={"video_file": (os.path.basename(file_path), f, mime)},
         )
-
     if not response.ok:
         raise Exception(f"TikTok upload error {response.status_code}: {response.text}")
-
     return response.json()
