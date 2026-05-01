@@ -28,7 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# States
 (
     SELECT_PLATFORM,
     GET_DRIVE_LINK,
@@ -51,21 +50,21 @@ PLATFORM_KEYBOARD = InlineKeyboardMarkup([
 ])
 
 
-def _detect_file_type(path: str, mime_type: str = None) -> str:
-    """Detect image or video using Drive mimeType first, then file extension."""
+def _detect_file_type(mime_type: str, path: str = "") -> str:
+    """Use Drive mimeType first (always accurate), fallback to extension."""
     if mime_type:
         if mime_type.startswith("video/"):
             return "video"
         if mime_type.startswith("image/"):
             return "image"
     ext = os.path.splitext(path)[1].lower()
-    return "video" if ext in [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"] else "image"
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".3gp", ".wmv", ".flv", ".ts", ".mts"}
+    return "video" if ext in video_exts else "image"
 
 
-async def _upload_file(local_path: str, platform: str, mime_type: str = None) -> dict:
-    """Run the blocking upload in a thread so the event loop isn't blocked."""
-    file_type = _detect_file_type(local_path, mime_type)
-    logger.info(f"Uploading {os.path.basename(local_path)} as {file_type} to {platform}")
+async def _upload_file(local_path: str, platform: str, mime_type: str = "") -> dict:
+    file_type = _detect_file_type(mime_type, local_path)
+    logger.info(f"Uploading '{os.path.basename(local_path)}' | mime={mime_type} | detected={file_type} | platform={platform}")
     if platform == "meta":
         return await asyncio.to_thread(upload_to_meta, local_path, file_type)
     elif platform == "snapchat":
@@ -88,7 +87,7 @@ async def start(update: Update, context) -> int:
     return ConversationHandler.END
 
 
-# ── Platform selector (shared) ────────────────────────────────────────────────
+# ── Platform selector ─────────────────────────────────────────────────────────
 
 async def select_platform(update: Update, context) -> int:
     query = update.callback_query
@@ -97,7 +96,6 @@ async def select_platform(update: Update, context) -> int:
     context.user_data["platform"] = platform
     name = PLATFORM_NAMES.get(platform, platform)
     mode = context.user_data.get("mode", "single")
-
     if mode == "folder":
         await query.edit_message_text(f"✅ {name}\n\nأرسل رابط فولدر Google Drive:")
         return GET_FOLDER_LINK
@@ -109,7 +107,7 @@ async def select_platform(update: Update, context) -> int:
         return GET_DRIVE_LINK
 
 
-# ── Single file upload ────────────────────────────────────────────────────────
+# ── Single file ───────────────────────────────────────────────────────────────
 
 async def upload_command(update: Update, context) -> int:
     context.user_data["mode"] = "single"
@@ -141,10 +139,15 @@ async def confirm_upload(update: Update, context) -> int:
     platform = context.user_data["platform"]
     base_path = f"/tmp/temp_{file_id}"
     local_path = base_path
+    mime_type = ""
     try:
-        local_path = await asyncio.to_thread(download_file_from_drive, file_id, base_path)
-        await update.message.reply_text("✅ تم التحميل. جارٍ الرفع...")
-        result = await _upload_file(local_path, platform)
+        # download_file_from_drive now returns (path, mime_type)
+        local_path, mime_type = await asyncio.to_thread(download_file_from_drive, file_id, base_path)
+        logger.info(f"Downloaded: {local_path} | mime: {mime_type}")
+        await update.message.reply_text(
+            f"✅ تم التحميل ({mime_type or 'unknown'}).\nجارٍ الرفع..."
+        )
+        result = await _upload_file(local_path, platform, mime_type)
         await update.message.reply_text(
             f"🎉 تمت العملية بنجاح!\n`{result}`", parse_mode="Markdown"
         )
@@ -157,7 +160,7 @@ async def confirm_upload(update: Update, context) -> int:
     return ConversationHandler.END
 
 
-# ── Multi-link upload ─────────────────────────────────────────────────────────
+# ── Multi-link ────────────────────────────────────────────────────────────────
 
 async def upload_multi_command(update: Update, context) -> int:
     context.user_data["mode"] = "multi"
@@ -181,9 +184,10 @@ async def get_multi_links(update: Update, context) -> int:
             continue
         base_path = f"/tmp/temp_{file_id}"
         local_path = base_path
+        mime_type = ""
         try:
-            local_path = await asyncio.to_thread(download_file_from_drive, file_id, base_path)
-            await _upload_file(local_path, platform)
+            local_path, mime_type = await asyncio.to_thread(download_file_from_drive, file_id, base_path)
+            await _upload_file(local_path, platform, mime_type)
             ok += 1
         except Exception as e:
             fail += 1
@@ -210,28 +214,19 @@ async def get_folder_link(update: Update, context) -> int:
     if not folder_id:
         await update.message.reply_text("❌ رابط غير صالح. أرسل رابط فولدر Google Drive:")
         return GET_FOLDER_LINK
-
     context.user_data["folder_id"] = folder_id
     await update.message.reply_text("⏳ جارٍ تحميل قائمة الفولدرات...")
-
     try:
         subfolders = await asyncio.to_thread(list_subfolders, folder_id)
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ في الوصول للفولدر: {e}")
         return ConversationHandler.END
-
     context.user_data["subfolders"] = subfolders
-
     rows = []
     for i, folder in enumerate(subfolders[:48]):
         rows.append([InlineKeyboardButton(f"📁 {folder['name']}", callback_data=f"sf:{i}")])
     rows.append([InlineKeyboardButton("📂 رفع كل الملفات في هذا الفولدر مباشرة", callback_data="sf:all")])
-
-    msg = (
-        f"وجدت {len(subfolders)} فولدر فرعي. اختر فولدراً للرفع:"
-        if subfolders else
-        "لا توجد فولدرات فرعية. اضغط لرفع كل الملفات:"
-    )
+    msg = (f"وجدت {len(subfolders)} فولدر فرعي. اختر فولدراً:" if subfolders else "لا توجد فولدرات فرعية:")
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(rows))
     return SELECT_SUBFOLDER
 
@@ -239,80 +234,54 @@ async def get_folder_link(update: Update, context) -> int:
 async def select_subfolder(update: Update, context) -> int:
     query = update.callback_query
     await query.answer()
-
     data = query.data
     root_folder_id = context.user_data["folder_id"]
     platform = context.user_data["platform"]
     subfolders = context.user_data.get("subfolders", [])
-
     if data == "sf:all":
-        target_id = root_folder_id
-        folder_name = "الفولدر الرئيسي"
+        target_id, folder_name = root_folder_id, "الفولدر الرئيسي"
     else:
         idx = int(data.split(":")[1])
         target_id = subfolders[idx]["id"]
         folder_name = subfolders[idx]["name"]
-
     await query.edit_message_text(f"⏳ جارٍ جلب ملفات: {folder_name}...")
-
     try:
         files = await asyncio.to_thread(list_files_in_folder, target_id)
     except Exception as e:
         await query.message.reply_text(f"❌ خطأ: {e}")
         return ConversationHandler.END
-
     if not files:
         await query.message.reply_text("❌ لا توجد ملفات في هذا الفولدر.")
         return ConversationHandler.END
-
-    # Separate images and videos for reporting
     images = [f for f in files if f.get("mimeType", "").startswith("image/")]
     videos = [f for f in files if f.get("mimeType", "").startswith("video/")]
-    others = [f for f in files if not f.get("mimeType", "").startswith(("image/", "video/"))]
-
     await query.message.reply_text(
-        f"📊 فولدر «{folder_name}»:\n"
-        f"• صور: {len(images)}\n"
-        f"• فيديوهات: {len(videos)}\n"
-        f"• أخرى: {len(others)}\n"
-        f"المجموع: {len(files)} ملف\n\n"
-        f"⏳ جارٍ الرفع واحداً واحداً..."
+        f"📊 فولدر «{folder_name}»:\n• صور: {len(images)}\n• فيديوهات: {len(videos)}\n"
+        f"المجموع: {len(files)}\n\n⏳ جارٍ الرفع..."
     )
-
     ok_img = ok_vid = fail = 0
-
     for file_info in files:
         file_id = file_info["id"]
         file_name = file_info["name"]
         mime_type = file_info.get("mimeType", "")
         local_path = f"/tmp/{file_name}"
-
         try:
-            # Download in thread (non-blocking)
             await asyncio.to_thread(download_file_by_name, file_id, file_name, "/tmp")
-            # Upload in thread with correct type from mimeType
             await _upload_file(local_path, platform, mime_type)
-
             if mime_type.startswith("video/"):
                 ok_vid += 1
-                logger.info(f"✅ Video uploaded: {file_name}")
             else:
                 ok_img += 1
-                logger.info(f"✅ Image uploaded: {file_name}")
-
+            logger.info(f"✅ {file_name} ({mime_type})")
         except Exception as e:
             fail += 1
-            logger.error(f"Error uploading {file_name}: {e}")
+            logger.error(f"Error {file_name}: {e}")
             await query.message.reply_text(f"⚠️ فشل: {file_name}\n{e}")
         finally:
             if os.path.exists(local_path):
                 os.remove(local_path)
-
     await query.message.reply_text(
-        f"✅ انتهى رفع فولدر «{folder_name}»\n"
-        f"• صور تم رفعها: {ok_img}\n"
-        f"• فيديوهات تم رفعها: {ok_vid}\n"
-        f"• فشل: {fail}"
+        f"✅ انتهى «{folder_name}»\n• صور: {ok_img}\n• فيديوهات: {ok_vid}\n• فشل: {fail}"
     )
     return ConversationHandler.END
 
@@ -329,7 +298,6 @@ async def cancel(update: Update, context) -> int:
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     app = Application.builder().token(token).build()
-
     single_conv = ConversationHandler(
         entry_points=[CommandHandler("upload", upload_command)],
         states={
@@ -339,7 +307,6 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-
     multi_conv = ConversationHandler(
         entry_points=[CommandHandler("upload_multi", upload_multi_command)],
         states={
@@ -348,7 +315,6 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-
     folder_conv = ConversationHandler(
         entry_points=[CommandHandler("upload_folder", upload_folder_command)],
         states={
@@ -358,12 +324,10 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(single_conv)
     app.add_handler(multi_conv)
     app.add_handler(folder_conv)
-
     logger.info("Bot started...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
