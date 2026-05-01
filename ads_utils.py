@@ -1,6 +1,12 @@
 import os
 import hashlib
+import mimetypes
 import requests
+
+
+def _get_mime_type(file_path: str, fallback: str) -> str:
+    mime, _ = mimetypes.guess_type(file_path)
+    return mime if mime else fallback
 
 
 def _get_snapchat_access_token() -> str:
@@ -20,24 +26,26 @@ def _get_snapchat_access_token() -> str:
 def upload_to_meta(file_path: str, file_type: str) -> dict:
     access_token = os.getenv("META_ADS_ACCESS_TOKEN")
     ad_account_id = os.getenv("META_ADS_ACCOUNT_ID")
+    file_name = os.path.basename(file_path)
 
     if file_type == "video":
+        mime = _get_mime_type(file_path, "video/mp4")
         url = f"https://graph-video.facebook.com/v18.0/{ad_account_id}/advideos"
         with open(file_path, "rb") as f:
             response = requests.post(
                 url,
-                data={"access_token": access_token, "name": os.path.basename(file_path)},
-                files={"source": f},
+                data={"access_token": access_token, "name": file_name},
+                files={"source": (file_name, f, mime)},
             )
     else:
+        mime = _get_mime_type(file_path, "image/jpeg")
         url = f"https://graph.facebook.com/v18.0/{ad_account_id}/adimages"
-        file_name = os.path.basename(file_path)
         with open(file_path, "rb") as f:
-            # Meta API requires the multipart field name to be the actual filename
+            # Meta requires: files field name = actual filename, with correct MIME type
             response = requests.post(
                 url,
                 data={"access_token": access_token},
-                files={file_name: f},
+                files={file_name: (file_name, f, mime)},
             )
 
     if not response.ok:
@@ -65,9 +73,14 @@ def upload_to_snapchat(file_path: str, file_type: str) -> dict:
 
     media_id = create_res.json()["media"][0]["media"]["id"]
 
+    mime = _get_mime_type(file_path, "video/mp4" if file_type == "video" else "image/jpeg")
     upload_url = f"https://adsapi.snapchat.com/v1/media/{media_id}/upload"
     with open(file_path, "rb") as f:
-        upload_res = requests.post(upload_url, headers=headers, files={"file": f})
+        upload_res = requests.post(
+            upload_url,
+            headers=headers,
+            files={"file": (os.path.basename(file_path), f, mime)},
+        )
     if not upload_res.ok:
         raise Exception(f"Snapchat upload error {upload_res.status_code}: {upload_res.text}")
 
@@ -88,8 +101,14 @@ def upload_to_tiktok(file_path: str) -> dict:
         "video_signature": video_signature,
         "video_name": os.path.basename(file_path),
     }
+    mime = _get_mime_type(file_path, "video/mp4")
     with open(file_path, "rb") as f:
-        response = requests.post(url, headers=headers, data=data, files={"video_file": f})
+        response = requests.post(
+            url,
+            headers=headers,
+            data=data,
+            files={"video_file": (os.path.basename(file_path), f, mime)},
+        )
 
     if not response.ok:
         raise Exception(f"TikTok upload error {response.status_code}: {response.text}")
