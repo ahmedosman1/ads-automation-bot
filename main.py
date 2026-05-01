@@ -11,89 +11,43 @@ from telegram.ext import (
 )
 from dotenv import load_dotenv
 from ads_utils import upload_to_meta, upload_to_snapchat, upload_to_tiktok
-from drive_utils import download_file_from_drive, get_file_id_from_link
+from drive_utils import (
+    download_file_from_drive,
+    download_file_by_name,
+    get_file_id_from_link,
+    get_folder_id_from_link,
+    list_subfolders,
+    list_files_in_folder,
+)
 
-
-# Load environment variables
 load_dotenv()
 
-
-# Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-
 # States
-SELECT_PLATFORM, GET_DRIVE_LINK, CONFIRM_UPLOAD, GET_MULTI_LINKS = range(4)
+(
+    SELECT_PLATFORM,
+    GET_DRIVE_LINK,
+    CONFIRM_UPLOAD,
+    GET_MULTI_LINKS,
+    GET_FOLDER_LINK,
+    SELECT_SUBFOLDER,
+) = range(6)
 
+PLATFORM_NAMES = {
+    "meta": "Meta Ads 📘",
+    "snapchat": "Snapchat Ads 👻",
+    "tiktok": "TikTok Ads 🎵",
+}
 
-async def start(update: Update, context) -> int:
-    await update.message.reply_text(
-        "مرحباً! 👋\n"
-        "أنا بوت أتمتة الإعلانات.\n"
-        "استخدم /upload لرفع ملف واحد.\n"
-        "استخدم /upload_multi لرفع عدة ملفات دفعة واحدة.\n"
-        "استخدم /cancel لإلغاء أي عملية جارية."
-    )
-    return ConversationHandler.END
-
-
-async def upload_command(update: Update, context) -> int:
-    keyboard = [
-        [InlineKeyboardButton("Meta Ads 📘", callback_data="meta")],
-        [InlineKeyboardButton("Snapchat Ads 👻", callback_data="snapchat")],
-        [InlineKeyboardButton("TikTok Ads 🎵", callback_data="tiktok")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("اختر المنصة الإعلانية:", reply_markup=reply_markup)
-    return SELECT_PLATFORM
-
-
-async def select_platform(update: Update, context) -> int:
-    query = update.callback_query
-    await query.answer()
-    platform = query.data
-    context.user_data["platform"] = platform
-    platform_names = {
-        "meta": "Meta Ads 📘",
-        "snapchat": "Snapchat Ads 👻",
-        "tiktok": "TikTok Ads 🎵"
-    }
-    name = platform_names.get(platform, platform)
-    await query.edit_message_text(
-        f"✅ تم اختيار {name}\n\n"
-        "أرسل رابط Google Drive للملف (صورة أو فيديو):"
-    )
-    return GET_DRIVE_LINK
-
-
-async def get_drive_link(update: Update, context) -> int:
-    link = update.message.text.strip()
-    file_id = get_file_id_from_link(link)
-    if not file_id:
-        await update.message.reply_text(
-            "❌ رابط غير صالح. تأكد أن الرابط من Google Drive وحاول مرة أخرى:"
-        )
-        return GET_DRIVE_LINK
-
-    context.user_data["drive_link"] = link
-    context.user_data["file_id"] = file_id
-    platform = context.user_data["platform"]
-    platform_names = {
-        "meta": "Meta Ads 📘",
-        "snapchat": "Snapchat Ads 👻",
-        "tiktok": "TikTok Ads 🎵"
-    }
-    name = platform_names.get(platform, platform)
-    await update.message.reply_text(
-        f"📋 تفاصيل الرفع:\n"
-        f"• المنصة: {name}\n"
-        f"• رابط الملف: {link}\n\n"
-        "هل تريد المتابعة؟ (نعم / لا)"
-    )
-    return CONFIRM_UPLOAD
+PLATFORM_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Meta Ads 📘", callback_data="meta")],
+    [InlineKeyboardButton("Snapchat Ads 👻", callback_data="snapchat")],
+    [InlineKeyboardButton("TikTok Ads 🎵", callback_data="tiktok")],
+])
 
 
 def _detect_file_type(path: str) -> str:
@@ -112,103 +66,245 @@ async def _upload_file(local_path: str, platform: str) -> dict:
     return {}
 
 
+# ── /start ────────────────────────────────────────────────────────────────────
+
+async def start(update: Update, context) -> int:
+    await update.message.reply_text(
+        "مرحباً! 👋 أنا بوت أتمتة الإعلانات.\n\n"
+        "/upload — رفع ملف واحد\n"
+        "/upload_multi — رفع روابط متعددة\n"
+        "/upload_folder — رفع فولدر كامل من Drive\n"
+        "/cancel — إلغاء أي عملية"
+    )
+    return ConversationHandler.END
+
+
+# ── Platform selector (shared) ────────────────────────────────────────────────
+
+async def select_platform(update: Update, context) -> int:
+    query = update.callback_query
+    await query.answer()
+    platform = query.data
+    context.user_data["platform"] = platform
+    name = PLATFORM_NAMES.get(platform, platform)
+    mode = context.user_data.get("mode", "single")
+
+    if mode == "folder":
+        await query.edit_message_text(
+            f"✅ {name}\n\nأرسل رابط فولدر Google Drive:"
+        )
+        return GET_FOLDER_LINK
+    elif mode == "multi":
+        await query.edit_message_text(
+            f"✅ {name}\n\nأرسل الروابط (كل رابط في سطر):"
+        )
+        return GET_MULTI_LINKS
+    else:
+        await query.edit_message_text(
+            f"✅ {name}\n\nأرسل رابط Google Drive للملف:"
+        )
+        return GET_DRIVE_LINK
+
+
+# ── Single file upload ────────────────────────────────────────────────────────
+
+async def upload_command(update: Update, context) -> int:
+    context.user_data["mode"] = "single"
+    await update.message.reply_text("اختر المنصة:", reply_markup=PLATFORM_KEYBOARD)
+    return SELECT_PLATFORM
+
+
+async def get_drive_link(update: Update, context) -> int:
+    link = update.message.text.strip()
+    file_id = get_file_id_from_link(link)
+    if not file_id:
+        await update.message.reply_text("❌ رابط غير صالح. أرسل رابط Google Drive صحيح:")
+        return GET_DRIVE_LINK
+    context.user_data["file_id"] = file_id
+    platform = context.user_data["platform"]
+    name = PLATFORM_NAMES.get(platform, platform)
+    await update.message.reply_text(
+        f"📋 المنصة: {name}\nالرابط: {link}\n\nهل تريد المتابعة؟ (نعم / لا)"
+    )
+    return CONFIRM_UPLOAD
+
+
 async def confirm_upload(update: Update, context) -> int:
-    response = update.message.text.strip().lower()
-    if response not in ["نعم", "yes", "y"]:
-        await update.message.reply_text("❌ تم الإلغاء. استخدم /upload للبدء من جديد.")
+    if update.message.text.strip().lower() not in ["نعم", "yes", "y"]:
+        await update.message.reply_text("❌ تم الإلغاء.")
         return ConversationHandler.END
 
     await update.message.reply_text("⏳ جارٍ التحميل من Google Drive...")
-
     file_id = context.user_data["file_id"]
     platform = context.user_data["platform"]
     base_path = f"/tmp/temp_{file_id}"
     local_path = base_path
-
     try:
-        # FIX: capture returned path which includes the file extension
         local_path = download_file_from_drive(file_id, base_path)
         await update.message.reply_text("✅ تم التحميل. جارٍ الرفع...")
-
         result = await _upload_file(local_path, platform)
-
         await update.message.reply_text(
-            f"🎉 تمت العملية بنجاح!\n\nالنتيجة:\n`{result}`",
+            f"🎉 تمت العملية بنجاح!\n`{result}`",
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Error in confirm_upload: {e}")
+        logger.error(f"confirm_upload error: {e}")
         await update.message.reply_text(
-            f"❌ حدث خطأ أثناء العملية: `{e}`\nحاول مرة أخرى أو تواصل مع المسؤول.",
-            parse_mode="Markdown"
+            f"❌ خطأ: `{e}`", parse_mode="Markdown"
         )
     finally:
         if os.path.exists(local_path):
             os.remove(local_path)
-
     return ConversationHandler.END
 
 
-# --- Multi-file upload ---
+# ── Multi-link upload ─────────────────────────────────────────────────────────
 
 async def upload_multi_command(update: Update, context) -> int:
-    keyboard = [
-        [InlineKeyboardButton("Meta Ads 📘", callback_data="meta")],
-        [InlineKeyboardButton("Snapchat Ads 👻", callback_data="snapchat")],
-        [InlineKeyboardButton("TikTok Ads 🎵", callback_data="tiktok")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("اختر المنصة لرفع عدة ملفات:", reply_markup=reply_markup)
+    context.user_data["mode"] = "multi"
+    await update.message.reply_text("اختر المنصة:", reply_markup=PLATFORM_KEYBOARD)
     return SELECT_PLATFORM
 
 
 async def get_multi_links(update: Update, context) -> int:
-    text = update.message.text.strip()
-    links = [l.strip() for l in text.splitlines() if l.strip()]
+    links = [l.strip() for l in update.message.text.strip().splitlines() if l.strip()]
     platform = context.user_data["platform"]
-
     if not links:
-        await update.message.reply_text("❌ لم يتم إرسال أي روابط. حاول مرة أخرى:")
+        await update.message.reply_text("❌ لم يتم إرسال روابط. حاول مرة أخرى:")
         return GET_MULTI_LINKS
-
     await update.message.reply_text(f"⏳ جارٍ معالجة {len(links)} ملف(ات)...")
-
-    success_count = 0
-    fail_count = 0
-
+    ok = fail = 0
     for link in links:
         file_id = get_file_id_from_link(link)
         if not file_id:
-            fail_count += 1
+            fail += 1
             await update.message.reply_text(f"⚠️ رابط غير صالح: {link}")
             continue
-
         base_path = f"/tmp/temp_{file_id}"
         local_path = base_path
         try:
             local_path = download_file_from_drive(file_id, base_path)
             await _upload_file(local_path, platform)
-            success_count += 1
+            ok += 1
         except Exception as e:
-            fail_count += 1
-            logger.error(f"Error uploading {link}: {e}")
-            await update.message.reply_text(f"❌ فشل رفع: {link}\nالسبب: {e}")
+            fail += 1
+            logger.error(f"multi upload error {link}: {e}")
+            await update.message.reply_text(f"❌ فشل: {link}\n{e}")
+        finally:
+            if os.path.exists(local_path):
+                os.remove(local_path)
+    await update.message.reply_text(f"✅ انتهى!\n• نجح: {ok}\n• فشل: {fail}")
+    return ConversationHandler.END
+
+
+# ── Folder upload ─────────────────────────────────────────────────────────────
+
+async def upload_folder_command(update: Update, context) -> int:
+    context.user_data["mode"] = "folder"
+    await update.message.reply_text("اختر المنصة:", reply_markup=PLATFORM_KEYBOARD)
+    return SELECT_PLATFORM
+
+
+async def get_folder_link(update: Update, context) -> int:
+    link = update.message.text.strip()
+    folder_id = get_folder_id_from_link(link)
+    if not folder_id:
+        await update.message.reply_text("❌ رابط غير صالح. أرسل رابط فولدر Google Drive:")
+        return GET_FOLDER_LINK
+
+    context.user_data["folder_id"] = folder_id
+    await update.message.reply_text("⏳ جارٍ تحميل قائمة الفولدرات...")
+
+    try:
+        subfolders = list_subfolders(folder_id)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ في الوصول للفولدر: {e}")
+        return ConversationHandler.END
+
+    context.user_data["subfolders"] = subfolders
+
+    # Build keyboard — one button per subfolder + root option
+    rows = []
+    for i, folder in enumerate(subfolders[:48]):  # Telegram limit
+        rows.append([InlineKeyboardButton(f"📁 {folder['name']}", callback_data=f"sf:{i}")])
+    rows.append([InlineKeyboardButton("📂 رفع كل الملفات في هذا الفولدر", callback_data="sf:all")])
+
+    msg = (
+        f"وجدت {len(subfolders)} فولدر فرعي. اختر فولدراً للرفع:"
+        if subfolders else
+        "لا توجد فولدرات فرعية. اضغط لرفع كل الملفات:"
+    )
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(rows))
+    return SELECT_SUBFOLDER
+
+
+async def select_subfolder(update: Update, context) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data           # "sf:0", "sf:1", ... or "sf:all"
+    root_folder_id = context.user_data["folder_id"]
+    platform = context.user_data["platform"]
+    subfolders = context.user_data.get("subfolders", [])
+
+    if data == "sf:all":
+        target_id = root_folder_id
+        folder_name = "الفولدر الرئيسي"
+    else:
+        idx = int(data.split(":")[1])
+        target_id = subfolders[idx]["id"]
+        folder_name = subfolders[idx]["name"]
+
+    await query.edit_message_text(f"⏳ جارٍ رفع ملفات: {folder_name}...")
+
+    try:
+        files = list_files_in_folder(target_id)
+    except Exception as e:
+        await query.message.reply_text(f"❌ خطأ: {e}")
+        return ConversationHandler.END
+
+    if not files:
+        await query.message.reply_text("❌ لا توجد ملفات في هذا الفولدر.")
+        return ConversationHandler.END
+
+    await query.message.reply_text(
+        f"📊 وجدت {len(files)} ملف في «{folder_name}». جارٍ الرفع..."
+    )
+
+    ok = fail = 0
+    for file_info in files:
+        file_id = file_info["id"]
+        file_name = file_info["name"]   # original name preserved
+        local_path = f"/tmp/{file_name}"
+        try:
+            download_file_by_name(file_id, file_name, "/tmp")
+            await _upload_file(local_path, platform)
+            ok += 1
+            logger.info(f"Uploaded: {file_name}")
+        except Exception as e:
+            fail += 1
+            logger.error(f"Error uploading {file_name}: {e}")
+            await query.message.reply_text(f"⚠️ فشل رفع: {file_name}\n{e}")
         finally:
             if os.path.exists(local_path):
                 os.remove(local_path)
 
-    await update.message.reply_text(
-        f"✅ انتهت العملية!\n"
-        f"• نجح: {success_count}\n"
-        f"• فشل: {fail_count}"
+    await query.message.reply_text(
+        f"✅ انتهى رفع فولدر «{folder_name}»\n"
+        f"• نجح: {ok}\n"
+        f"• فشل: {fail}"
     )
     return ConversationHandler.END
 
+
+# ── Cancel ────────────────────────────────────────────────────────────────────
 
 async def cancel(update: Update, context) -> int:
     await update.message.reply_text("❌ تم الإلغاء.")
     return ConversationHandler.END
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -218,8 +314,8 @@ def main() -> None:
         entry_points=[CommandHandler("upload", upload_command)],
         states={
             SELECT_PLATFORM: [CallbackQueryHandler(select_platform)],
-            GET_DRIVE_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_drive_link)],
-            CONFIRM_UPLOAD: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_upload)],
+            GET_DRIVE_LINK:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_drive_link)],
+            CONFIRM_UPLOAD:  [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_upload)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -233,9 +329,20 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    folder_conv = ConversationHandler(
+        entry_points=[CommandHandler("upload_folder", upload_folder_command)],
+        states={
+            SELECT_PLATFORM:  [CallbackQueryHandler(select_platform)],
+            GET_FOLDER_LINK:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_folder_link)],
+            SELECT_SUBFOLDER: [CallbackQueryHandler(select_subfolder, pattern="^sf:")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(single_conv)
     app.add_handler(multi_conv)
+    app.add_handler(folder_conv)
 
     logger.info("Bot started...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
