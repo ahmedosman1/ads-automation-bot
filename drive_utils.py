@@ -46,7 +46,6 @@ def get_folder_id_from_link(link: str) -> str | None:
 
 
 def list_subfolders(folder_id: str) -> list:
-    """Returns list of {id, name} dicts for subfolders only."""
     service = _get_service()
     query = (
         f"'{folder_id}' in parents "
@@ -54,16 +53,12 @@ def list_subfolders(folder_id: str) -> list:
         f"and trashed = false"
     )
     results = service.files().list(
-        q=query,
-        fields="files(id, name)",
-        orderBy="name",
-        pageSize=100,
+        q=query, fields="files(id, name)", orderBy="name", pageSize=100,
     ).execute()
     return results.get("files", [])
 
 
 def list_files_in_folder(folder_id: str) -> list:
-    """Returns list of {id, name, mimeType} for all non-folder files."""
     service = _get_service()
     query = (
         f"'{folder_id}' in parents "
@@ -89,11 +84,14 @@ def list_files_in_folder(folder_id: str) -> list:
     return all_files
 
 
-def download_file_from_drive(file_id: str, output_path: str) -> str:
-    """Download by file ID. Appends extension from metadata if output_path has none."""
+def download_file_from_drive(file_id: str, output_path: str) -> tuple:
+    """Download file and return (local_path, mime_type) tuple.
+    mime_type comes directly from Drive metadata — 100% accurate.
+    """
     service = _get_service()
     file_meta = service.files().get(fileId=file_id, fields="name,mimeType").execute()
     file_name = file_meta.get("name", file_id)
+    mime_type = file_meta.get("mimeType", "")
     ext = os.path.splitext(file_name)[1]
     if ext and not os.path.splitext(output_path)[1]:
         output_path = output_path + ext
@@ -104,11 +102,11 @@ def download_file_from_drive(file_id: str, output_path: str) -> str:
     while not done:
         _, done = downloader.next_chunk()
     fh.close()
-    return output_path
+    return output_path, mime_type
 
 
 def download_file_by_name(file_id: str, file_name: str, output_dir: str) -> str:
-    """Download keeping the original filename from Drive."""
+    """Download keeping the original filename. Returns local path."""
     service = _get_service()
     output_path = os.path.join(output_dir, file_name)
     request = service.files().get_media(fileId=file_id)
