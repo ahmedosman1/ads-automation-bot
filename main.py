@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -50,19 +51,27 @@ PLATFORM_KEYBOARD = InlineKeyboardMarkup([
 ])
 
 
-def _detect_file_type(path: str) -> str:
+def _detect_file_type(path: str, mime_type: str = None) -> str:
+    """Detect image or video using Drive mimeType first, then file extension."""
+    if mime_type:
+        if mime_type.startswith("video/"):
+            return "video"
+        if mime_type.startswith("image/"):
+            return "image"
     ext = os.path.splitext(path)[1].lower()
-    return "video" if ext in [".mp4", ".mov", ".avi", ".mkv", ".webm"] else "image"
+    return "video" if ext in [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"] else "image"
 
 
-async def _upload_file(local_path: str, platform: str) -> dict:
-    file_type = _detect_file_type(local_path)
+async def _upload_file(local_path: str, platform: str, mime_type: str = None) -> dict:
+    """Run the blocking upload in a thread so the event loop isn't blocked."""
+    file_type = _detect_file_type(local_path, mime_type)
+    logger.info(f"Uploading {os.path.basename(local_path)} as {file_type} to {platform}")
     if platform == "meta":
-        return upload_to_meta(local_path, file_type)
+        return await asyncio.to_thread(upload_to_meta, local_path, file_type)
     elif platform == "snapchat":
-        return upload_to_snapchat(local_path, file_type)
+        return await asyncio.to_thread(upload_to_snapchat, local_path, file_type)
     elif platform == "tiktok":
-        return upload_to_tiktok(local_path)
+        return await asyncio.to_thread(upload_to_tiktok, local_path)
     return {}
 
 
@@ -90,19 +99,13 @@ async def select_platform(update: Update, context) -> int:
     mode = context.user_data.get("mode", "single")
 
     if mode == "folder":
-        await query.edit_message_text(
-            f"✅ {name}\n\nأرسل رابط فولدر Google Drive:"
-        )
+        await query.edit_message_text(f"✅ {name}\n\nأرسل رابط فولدر Google Drive:")
         return GET_FOLDER_LINK
     elif mode == "multi":
-        await query.edit_message_text(
-            f"✅ {name}\n\nأرسل الروابط (كل رابط في سطر):"
-        )
+        await query.edit_message_text(f"✅ {name}\n\nأرسل الروابط (كل رابط في سطر):")
         return GET_MULTI_LINKS
     else:
-        await query.edit_message_text(
-            f"✅ {name}\n\nأرسل رابط Google Drive للملف:"
-        )
+        await query.edit_message_text(f"✅ {name}\n\nأرسل رابط Google Drive للملف:")
         return GET_DRIVE_LINK
 
 
@@ -121,8 +124,7 @@ async def get_drive_link(update: Update, context) -> int:
         await update.message.reply_text("❌ رابط غير صالح. أرسل رابط Google Drive صحيح:")
         return GET_DRIVE_LINK
     context.user_data["file_id"] = file_id
-    platform = context.user_data["platform"]
-    name = PLATFORM_NAMES.get(platform, platform)
+    name = PLATFORM_NAMES.get(context.user_data["platform"], "")
     await update.message.reply_text(
         f"📋 المنصة: {name}\nالرابط: {link}\n\nهل تريد المتابعة؟ (نعم / لا)"
     )
@@ -140,18 +142,15 @@ async def confirm_upload(update: Update, context) -> int:
     base_path = f"/tmp/temp_{file_id}"
     local_path = base_path
     try:
-        local_path = download_file_from_drive(file_id, base_path)
+        local_path = await asyncio.to_thread(download_file_from_drive, file_id, base_path)
         await update.message.reply_text("✅ تم التحميل. جارٍ الرفع...")
         result = await _upload_file(local_path, platform)
         await update.message.reply_text(
-            f"🎉 تمت العملية بنجاح!\n`{result}`",
-            parse_mode="Markdown"
+            f"🎉 تمت العملية بنجاح!\n`{result}`", parse_mode="Markdown"
         )
     except Exception as e:
         logger.error(f"confirm_upload error: {e}")
-        await update.message.reply_text(
-            f"❌ خطأ: `{e}`", parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"❌ خطأ: `{e}`", parse_mode="Markdown")
     finally:
         if os.path.exists(local_path):
             os.remove(local_path)
@@ -183,7 +182,7 @@ async def get_multi_links(update: Update, context) -> int:
         base_path = f"/tmp/temp_{file_id}"
         local_path = base_path
         try:
-            local_path = download_file_from_drive(file_id, base_path)
+            local_path = await asyncio.to_thread(download_file_from_drive, file_id, base_path)
             await _upload_file(local_path, platform)
             ok += 1
         except Exception as e:
@@ -216,18 +215,17 @@ async def get_folder_link(update: Update, context) -> int:
     await update.message.reply_text("⏳ جارٍ تحميل قائمة الفولدرات...")
 
     try:
-        subfolders = list_subfolders(folder_id)
+        subfolders = await asyncio.to_thread(list_subfolders, folder_id)
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ في الوصول للفولدر: {e}")
         return ConversationHandler.END
 
     context.user_data["subfolders"] = subfolders
 
-    # Build keyboard — one button per subfolder + root option
     rows = []
-    for i, folder in enumerate(subfolders[:48]):  # Telegram limit
+    for i, folder in enumerate(subfolders[:48]):
         rows.append([InlineKeyboardButton(f"📁 {folder['name']}", callback_data=f"sf:{i}")])
-    rows.append([InlineKeyboardButton("📂 رفع كل الملفات في هذا الفولدر", callback_data="sf:all")])
+    rows.append([InlineKeyboardButton("📂 رفع كل الملفات في هذا الفولدر مباشرة", callback_data="sf:all")])
 
     msg = (
         f"وجدت {len(subfolders)} فولدر فرعي. اختر فولدراً للرفع:"
@@ -242,7 +240,7 @@ async def select_subfolder(update: Update, context) -> int:
     query = update.callback_query
     await query.answer()
 
-    data = query.data           # "sf:0", "sf:1", ... or "sf:all"
+    data = query.data
     root_folder_id = context.user_data["folder_id"]
     platform = context.user_data["platform"]
     subfolders = context.user_data.get("subfolders", [])
@@ -255,10 +253,10 @@ async def select_subfolder(update: Update, context) -> int:
         target_id = subfolders[idx]["id"]
         folder_name = subfolders[idx]["name"]
 
-    await query.edit_message_text(f"⏳ جارٍ رفع ملفات: {folder_name}...")
+    await query.edit_message_text(f"⏳ جارٍ جلب ملفات: {folder_name}...")
 
     try:
-        files = list_files_in_folder(target_id)
+        files = await asyncio.to_thread(list_files_in_folder, target_id)
     except Exception as e:
         await query.message.reply_text(f"❌ خطأ: {e}")
         return ConversationHandler.END
@@ -267,31 +265,53 @@ async def select_subfolder(update: Update, context) -> int:
         await query.message.reply_text("❌ لا توجد ملفات في هذا الفولدر.")
         return ConversationHandler.END
 
+    # Separate images and videos for reporting
+    images = [f for f in files if f.get("mimeType", "").startswith("image/")]
+    videos = [f for f in files if f.get("mimeType", "").startswith("video/")]
+    others = [f for f in files if not f.get("mimeType", "").startswith(("image/", "video/"))]
+
     await query.message.reply_text(
-        f"📊 وجدت {len(files)} ملف في «{folder_name}». جارٍ الرفع..."
+        f"📊 فولدر «{folder_name}»:\n"
+        f"• صور: {len(images)}\n"
+        f"• فيديوهات: {len(videos)}\n"
+        f"• أخرى: {len(others)}\n"
+        f"المجموع: {len(files)} ملف\n\n"
+        f"⏳ جارٍ الرفع واحداً واحداً..."
     )
 
-    ok = fail = 0
+    ok_img = ok_vid = fail = 0
+
     for file_info in files:
         file_id = file_info["id"]
-        file_name = file_info["name"]   # original name preserved
+        file_name = file_info["name"]
+        mime_type = file_info.get("mimeType", "")
         local_path = f"/tmp/{file_name}"
+
         try:
-            download_file_by_name(file_id, file_name, "/tmp")
-            await _upload_file(local_path, platform)
-            ok += 1
-            logger.info(f"Uploaded: {file_name}")
+            # Download in thread (non-blocking)
+            await asyncio.to_thread(download_file_by_name, file_id, file_name, "/tmp")
+            # Upload in thread with correct type from mimeType
+            await _upload_file(local_path, platform, mime_type)
+
+            if mime_type.startswith("video/"):
+                ok_vid += 1
+                logger.info(f"✅ Video uploaded: {file_name}")
+            else:
+                ok_img += 1
+                logger.info(f"✅ Image uploaded: {file_name}")
+
         except Exception as e:
             fail += 1
             logger.error(f"Error uploading {file_name}: {e}")
-            await query.message.reply_text(f"⚠️ فشل رفع: {file_name}\n{e}")
+            await query.message.reply_text(f"⚠️ فشل: {file_name}\n{e}")
         finally:
             if os.path.exists(local_path):
                 os.remove(local_path)
 
     await query.message.reply_text(
         f"✅ انتهى رفع فولدر «{folder_name}»\n"
-        f"• نجح: {ok}\n"
+        f"• صور تم رفعها: {ok_img}\n"
+        f"• فيديوهات تم رفعها: {ok_vid}\n"
         f"• فشل: {fail}"
     )
     return ConversationHandler.END
