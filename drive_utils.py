@@ -1,4 +1,3 @@
-
 import os
 import io
 import re
@@ -7,15 +6,23 @@ from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-def get_file_id_from_link(link):
-    """Extracts the file ID from a Google Drive sharing link."""
-    match = re.search(r'[-\w]{25,}', link)
-    return match.group(0) if match else None
 
-def download_file_from_drive(file_id, output_path):
+def get_file_id_from_link(link: str) -> str | None:
+    """Extracts the file ID from a Google Drive sharing link."""
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]{25,})",
+        r"[?&]id=([a-zA-Z0-9_-]{25,})",
+        r"/d/([a-zA-Z0-9_-]{25,})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, link)
+        if match:
+            return match.group(1)
+    return None
+
+
+def download_file_from_drive(file_id: str, output_path: str) -> str:
     """Downloads a file from Google Drive using its file ID."""
-    # Note: In a real scenario, you'd need to handle OAuth2 refresh tokens properly
-    # For this example, we assume environment variables are set for credentials
     creds = Credentials(
         None,
         refresh_token=os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"),
@@ -23,19 +30,25 @@ def download_file_from_drive(file_id, output_path):
         client_id=os.getenv("GOOGLE_DRIVE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_DRIVE_CLIENT_SECRET"),
     )
-    
+
     if not creds.valid:
         creds.refresh(Request())
 
-    service = build('drive', 'v3', credentials=creds)
-    
+    service = build("drive", "v3", credentials=creds)
+
+    # Get file metadata to determine extension
+    file_meta = service.files().get(fileId=file_id, fields="name,mimeType").execute()
+    file_name = file_meta.get("name", file_id)
+    ext = os.path.splitext(file_name)[1]
+    if ext:
+        output_path = output_path + ext
+
     request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(output_path, 'wb')
+    fh = io.FileIO(output_path, "wb")
     downloader = MediaIoBaseDownload(fh, request)
-    
     done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-        print(f"Download {int(status.progress() * 100)}%.")
-    
+    while not done:
+        _, done = downloader.next_chunk()
+    fh.close()
+
     return output_path
