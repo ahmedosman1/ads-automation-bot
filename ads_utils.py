@@ -48,9 +48,13 @@ def _get_snapchat_access_token() -> str:
     return response.json()["access_token"]
 
 
-def upload_to_meta(file_path: str, file_type: str) -> dict:
-    access_token = os.getenv("META_ADS_ACCESS_TOKEN")
-    ad_account_id = os.getenv("META_ADS_ACCOUNT_ID")
+def upload_to_meta(file_path: str, file_type: str,
+                   account_id: str = None, access_token: str = None) -> dict:
+    """Upload image or video to Meta Ads.
+    account_id / access_token override env vars for multi-account support.
+    """
+    token = access_token or os.getenv("META_ADS_ACCESS_TOKEN")
+    ad_account_id = account_id or os.getenv("META_ADS_ACCOUNT_ID")
 
     if file_type == "video":
         # Always convert to H.264 MP4 — Meta only accepts this codec
@@ -61,7 +65,10 @@ def upload_to_meta(file_path: str, file_type: str) -> dict:
             with open(converted_path, "rb") as f:
                 response = requests.post(
                     url,
-                    data={"access_token": access_token, "name": os.path.splitext(os.path.basename(file_path))[0]},
+                    data={
+                        "access_token": token,
+                        "name": os.path.splitext(os.path.basename(file_path))[0],
+                    },
                     files={"source": (file_name, f, "video/mp4")},
                 )
         finally:
@@ -74,7 +81,7 @@ def upload_to_meta(file_path: str, file_type: str) -> dict:
         with open(file_path, "rb") as f:
             response = requests.post(
                 url,
-                data={"access_token": access_token},
+                data={"access_token": token},
                 files={file_name: (file_name, f, mime)},
             )
 
